@@ -1,0 +1,109 @@
+#------------------------------------------------------------
+#Calculates mean and root mean square distances from points (centroids) to the nearest polygon boundary
+#------------------------------------------------------------
+
+library(sf)
+library(dplyr)
+library(nngeo)
+
+# ----------------------------------------------------------
+# FUNCTION: Calculate mean distance to nearest polygon boundary
+# ----------------------------------------------------------
+calculate_signed_distances <- function(points_sf, polygons_sf) {
+  # Verify inputs
+  if (!all(st_geometry_type(points_sf) == "POINT")) {
+    stop("Input points_sf must contain only POINT geometries")
+  }
+  
+  valid_poly_types <- c("POLYGON", "MULTIPOLYGON")
+  if (!all(st_geometry_type(polygons_sf) %in% valid_poly_types)) {
+    stop("Input polygons_sf must contain only POLYGON/MULTIPOLYGON geometries")
+  }
+  
+  # Ensure identical CRS
+  if (st_crs(points_sf) != st_crs(polygons_sf)) {
+    message("Transforming polygons to match points CRS")
+    polygons_sf <- st_transform(polygons_sf, st_crs(points_sf))
+  }
+  
+  # Add row IDs if no ID column exists
+  if (!"id" %in% names(points_sf)) points_sf$id <- 1:nrow(points_sf)
+  if (!"id" %in% names(polygons_sf)) polygons_sf$id <- 1:nrow(polygons_sf)
+  
+  # Find nearest polygon for each point
+  nearest <- st_nn(points_sf, polygons_sf, returnDist = TRUE, progress = FALSE)
+  
+  # Process each point
+  results <- lapply(1:nrow(points_sf), function(i) {
+    point <- points_sf[i, ]
+    poly <- polygons_sf[nearest$nn[[i]], ]
+    
+    # Calculate distance to boundary
+    boundary_dist <- st_distance(point, st_boundary(poly))
+    
+    # Determine if point is inside polygon (with error handling)
+    inside <- tryCatch(
+      st_contains(poly, point, sparse = FALSE)[1,1],
+      error = function(e) FALSE
+    )
+    
+    # Create result row
+    data.frame(
+      point_id = point$id,
+      Area = point$Area,
+      point_x = st_coordinates(point)[1],
+      point_y = st_coordinates(point)[2],
+      nearest_poly_id = poly$id,
+      boundary_distance = as.numeric(boundary_dist),
+      is_inside = inside,
+      signed_distance = ifelse(inside, -as.numeric(boundary_dist), as.numeric(boundary_dist)),
+      stringsAsFactors = FALSE
+    )
+  }) %>% bind_rows()
+  
+  return(results)
+}
+
+# ----------------------------------------------------------
+# MAIN SCRIPT 
+# ----------------------------------------------------------
+
+# 1. Load data
+points <- st_read("centroids.shp", quiet = TRUE) # Insert centroids shapefile
+polygons <- st_read("treeline.shp", quiet = TRUE) # Insert treeline polygon shapefile
+
+
+# 2. Calculate signed distances
+distance_results <- calculate_signed_distances(points, polygons)
+
+# 3. Print summary
+cat("\nResults summary:\n")
+print(summary(distance_results$signed_distance))
+cat("\nFirst few results:\n")
+print(head(distance_results))
+
+# 4. Save results (optional) 
+# write.csv(distance_results, "point_polygon_distances.csv", row.names = FALSE)
+# cat(sprintf("\nSaved results for %d points to 'point_polygon_distances.csv'\n", 
+#             nrow(distance_results)))
+
+# 4. Calculate simple means and mean squares
+mean_dist <- mean(distance_results$boundary_distance)
+cat("\nmean distances to 'point_polygon_distances.csv'\n", mean_dist)
+
+mean_sq_dist <- with(distance_results, {
+  sum(signed_distance^2) / nrow(distance_results)
+})
+cat("\nmean distances to 'point_polygon_distances.csv'\n", mean_sq_dist)
+
+
+# 5. Calculate weighted means and mean squares
+weighted_mean_dist <- with(distance_results, {
+  sum(Area * boundary_distance) / sum(Area)
+})
+cat("\nWeighted distances to 'point_polygon_distances.csv'\n", weighted_mean_dist)
+
+weighted_mean_sq_dist <- with(distance_results, {
+  sum(Area * signed_distance^2) / sum(Area)
+})
+cat("\nWeighted squared distances to 'point_polygon_distances.csv'\n", weighted_mean_sq_dist)
